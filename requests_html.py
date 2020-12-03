@@ -8,6 +8,7 @@ from typing import Set, Union, List, MutableMapping, Optional
 
 import pyppeteer
 import requests
+import http.cookiejar
 from pyquery import PyQuery
 
 from fake_useragent import UserAgent
@@ -394,7 +395,7 @@ class Element(BaseParser):
         if self._attrs is None:
             self._attrs = {k: v for k, v in self.element.items()}
 
-            # Split class and rel up, as there are ussually many of them:
+            # Split class and rel up, as there are usually many of them:
             for attr in ['class', 'rel']:
                 if attr in self._attrs:
                     self._attrs[attr] = tuple(self._attrs[attr].split())
@@ -416,9 +417,9 @@ class HTML(BaseParser):
         if isinstance(html, str):
             html = html.encode(DEFAULT_ENCODING)
 
+        pq = PyQuery(html)
         super(HTML, self).__init__(
-            # Convert unicode HTML to bytes.
-            element=PyQuery(html)('html') or PyQuery(f'<html>{html}</html>')('html'),
+            element=pq('html') or pq.wrapAll('<html></html>')('html'),
             html=html,
             url=url,
             default_encoding=default_encoding
@@ -499,13 +500,18 @@ class HTML(BaseParser):
     def add_next_symbol(self, next_symbol):
         self.next_symbol.append(next_symbol)
 
-    async def _async_render(self, *, url: str, script: str = None, scrolldown, sleep: int, wait: float, reload, content: Optional[str], timeout: Union[float, int], keep_page: bool):
+    async def _async_render(self, *, url: str, script: str = None, scrolldown, sleep: int, wait: float, reload, content: Optional[str], timeout: Union[float, int], keep_page: bool, cookies: list = [{}]):
         """ Handle page creation and js rendering. Internal use for render/arender methods. """
         try:
             page = await self.browser.newPage()
 
             # Wait before rendering the page, to prevent timeouts.
             await asyncio.sleep(wait)
+
+            if cookies:
+                for cookie in cookies:
+                    if cookie:
+                        await page.setCookie(cookie)
 
             # Load the given page (GET request, obviously.)
             if reload:
@@ -538,7 +544,61 @@ class HTML(BaseParser):
             page = None
             return None
 
-    def render(self, retries: int = 8, script: str = None, wait: float = 0.2, scrolldown=False, sleep: int = 0, reload: bool = True, timeout: Union[float, int] = 8.0, keep_page: bool = False):
+    def _convert_cookiejar_to_render(self, session_cookiejar):
+        """
+        Convert HTMLSession.cookies:cookiejar[] for browser.newPage().setCookie
+        """
+        # |  setCookie(self, *cookies:dict) -> None
+        # |      Set cookies.
+        # |
+        # |      ``cookies`` should be dictionaries which contain these fields:
+        # |
+        # |      * ``name`` (str): **required**
+        # |      * ``value`` (str): **required**
+        # |      * ``url`` (str)
+        # |      * ``domain`` (str)
+        # |      * ``path`` (str)
+        # |      * ``expires`` (number): Unix time in seconds
+        # |      * ``httpOnly`` (bool)
+        # |      * ``secure`` (bool)
+        # |      * ``sameSite`` (str): ``'Strict'`` or ``'Lax'``
+        cookie_render = {}
+        def __convert(cookiejar, key):
+            try:
+                v = eval ("cookiejar."+key)
+                if not v: kv = ''
+                else: kv = {key: v}
+            except:
+                kv = ''
+            return kv
+
+        keys = [
+            'name',
+            'value',
+            'url',
+            'domain',
+            'path',
+            'sameSite',
+            'expires',
+            'httpOnly',
+            'secure',
+        ]
+        for key in keys:
+            cookie_render.update(__convert(session_cookiejar, key))
+        return cookie_render
+
+    def _convert_cookiesjar_to_render(self):
+        """
+        Convert HTMLSession.cookies for browser.newPage().setCookie
+        Return a list of dict
+        """
+        cookies_render = []
+        if isinstance(self.session.cookies, http.cookiejar.CookieJar):
+            for cookie in self.session.cookies:
+                cookies_render.append(self._convert_cookiejar_to_render(cookie))
+        return cookies_render
+
+    def render(self, retries: int = 8, script: str = None, wait: float = 0.2, scrolldown=False, sleep: int = 0, reload: bool = True, timeout: Union[float, int] = 8.0, keep_page: bool = False, cookies: list = [{}], send_cookies_session: bool = False):
         """Reloads the response in Chromium, and replaces HTML content
         with an updated version, with JavaScript executed.
 
@@ -546,9 +606,12 @@ class HTML(BaseParser):
         :param script: JavaScript to execute upon page load (optional).
         :param wait: The number of seconds to wait before loading the page, preventing timeouts (optional).
         :param scrolldown: Integer, if provided, of how many times to page down.
-        :param sleep: Integer, if provided, of how many long to sleep after initial render.
+        :param sleep: Integer, if provided, of how many seconds to sleep after initial render.
         :param reload: If ``False``, content will not be loaded from the browser, but will be provided from memory.
         :param keep_page: If ``True`` will allow you to interact with the browser page through ``r.html.page``.
+
+        :param send_cookies_session: If ``True`` send ``HTMLSession.cookies`` convert.
+        :param cookies: If not ``empty`` send ``cookies``.
 
         If ``scrolldown`` is specified, the page will scrolldown the specified
         number of times, after sleeping the specified amount of time
@@ -583,19 +646,21 @@ class HTML(BaseParser):
         Chromium into your home directory (``~/.pyppeteer``).
         """
 
-        self.browser = self.session.browser  # Automatycally create a event loop and browser
+        self.browser = self.session.browser  # Automatically create a event loop and browser
         content = None
 
         # Automatically set Reload to False, if example URL is being used.
         if self.url == DEFAULT_URL:
             reload = False
 
+        if send_cookies_session:
+           cookies = self._convert_cookiesjar_to_render()
 
         for i in range(retries):
             if not content:
                 try:
 
-                    content, result, page = self.session.loop.run_until_complete(self._async_render(url=self.url, script=script, sleep=sleep, wait=wait, content=self.html, reload=reload, scrolldown=scrolldown, timeout=timeout, keep_page=keep_page))
+                    content, result, page = self.session.loop.run_until_complete(self._async_render(url=self.url, script=script, sleep=sleep, wait=wait, content=self.html, reload=reload, scrolldown=scrolldown, timeout=timeout, keep_page=keep_page, cookies=cookies))
                 except TypeError:
                     pass
             else:
@@ -609,7 +674,7 @@ class HTML(BaseParser):
         self.page = page
         return result
 
-    async def arender(self, retries: int = 8, script: str = None, wait: float = 0.2, scrolldown=False, sleep: int = 0, reload: bool = True, timeout: Union[float, int] = 8.0, keep_page: bool = False):
+    async def arender(self, retries: int = 8, script: str = None, wait: float = 0.2, scrolldown=False, sleep: int = 0, reload: bool = True, timeout: Union[float, int] = 8.0, keep_page: bool = False, cookies: list = [{}], send_cookies_session: bool = False):
         """ Async version of render. Takes same parameters. """
 
         self.browser = await self.session.browser
@@ -619,11 +684,14 @@ class HTML(BaseParser):
         if self.url == DEFAULT_URL:
             reload = False
 
+        if send_cookies_session:
+           cookies = self._convert_cookiesjar_to_render()
+
         for _ in range(retries):
             if not content:
                 try:
 
-                    content, result, page = await self._async_render(url=self.url, script=script, sleep=sleep, wait=wait, content=self.html, reload=reload, scrolldown=scrolldown, timeout=timeout, keep_page=keep_page)
+                    content, result, page = await self._async_render(url=self.url, script=script, sleep=sleep, wait=wait, content=self.html, reload=reload, scrolldown=scrolldown, timeout=timeout, keep_page=keep_page, cookies=cookies)
                 except TypeError:
                     pass
             else:
@@ -766,8 +834,8 @@ class AsyncHTMLSession(BaseSession):
 
     def run(self, *coros):
         """ Pass in all the coroutines you want to run, it will wrap each one
-            in a task, run it and wait for the result. Retuen a list with all
-            results, this are returned in the same order coros are passed in. """
+            in a task, run it and wait for the result. Return a list with all
+            results, this is returned in the same order coros are passed in. """
         tasks = [
             asyncio.ensure_future(coro()) for coro in coros
         ]

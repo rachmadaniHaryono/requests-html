@@ -13,8 +13,8 @@ Requests-HTML: HTML Parsing for Humans (writing Python 3)!
 
 
 
-.. image:: https://travis-ci.org/kennethreitz/requests-html.svg?branch=master
-    :target: https://travis-ci.org/kennethreitz/requests-html
+.. image:: https://travis-ci.com/psf/requests-html.svg?branch=master
+    :target: https://travis-ci.com/psf/requests-html
 
 This library intends to make parsing HTML (e.g. scraping the web) as
 simple and intuitive as possible.
@@ -23,7 +23,7 @@ When using this library you automatically get:
 
 - **Full JavaScript support**!
 - *CSS Selectors* (a.k.a jQuery-style, thanks to PyQuery).
-- *XPath Selectors*, for the faint at heart.
+- *XPath Selectors*, for the faint of heart.
 - Mocked user-agent (like a real web browser).
 - Automatic following of redirects.
 - Connection–pooling and cookie persistence.
